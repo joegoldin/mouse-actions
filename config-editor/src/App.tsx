@@ -2,9 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
 import "./App.css";
 import { BindingMemo } from "./Binding";
-import { BindingType, ButtonType, ConfigType } from "./config.type";
+import {
+  BindingType,
+  ButtonType,
+  ChordBindingType,
+  ConfigType,
+  ModifierRemapType,
+} from "./config.type";
 import { ButtonSelector } from "./ButtonSelector";
-import { Button, ButtonGroup, Typography } from "@mui/material";
+import { ModifierRemapMemo } from "./ModifierRemap";
+import { ChordBindingMemo } from "./ChordBinding";
+import { Button, ButtonGroup, Divider, Typography } from "@mui/material";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import StopIcon from "@mui/icons-material/Stop";
 import SaveIcon from "@mui/icons-material/Save";
@@ -44,6 +52,12 @@ export default function App() {
     setTimeout(async () => {
       const newVconfig: ConfigType = await invoke("get_config");
       newVconfig.bindings.forEach((b) => (b.uid = self.crypto.randomUUID()));
+      (newVconfig.modifier_remaps ?? []).forEach(
+        (m) => (m.uid = self.crypto.randomUUID())
+      );
+      (newVconfig.chord_bindings ?? []).forEach(
+        (c) => (c.uid = self.crypto.randomUUID())
+      );
       setConfig(newVconfig);
       setIsLoading(false);
     }, 100);
@@ -126,10 +140,94 @@ export default function App() {
 
   const setShapeButton = (shape_button: ButtonType) => {
     setConfig((prevConfig) => ({
+      ...(prevConfig as ConfigType),
       bindings: [...(prevConfig?.bindings || [])],
       shape_button,
     }));
   };
+
+  // --- modifier_remaps ----------------------------------------------------
+
+  const setModifierRemap = useCallback((next: ModifierRemapType) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const list = [...(prev.modifier_remaps ?? [])];
+      const idx = list.findIndex((m) => m.uid === next.uid);
+      if (idx >= 0) list[idx] = next;
+      return { ...prev, modifier_remaps: list };
+    });
+  }, []);
+
+  const deleteModifierRemap = useCallback((m: ModifierRemapType) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        modifier_remaps: (prev.modifier_remaps ?? []).filter(
+          (r) => r.uid !== m.uid
+        ),
+      };
+    });
+  }, []);
+
+  const addModifierRemap = useCallback((after?: ModifierRemapType) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const list = [...(prev.modifier_remaps ?? [])];
+      const idx = after ? list.findIndex((m) => m.uid === after.uid) : -1;
+      list.splice(idx + 1, 0, {
+        uid: self.crypto.randomUUID(),
+        comment: "",
+        while_held: { kind: "Mouse", code: "Left" },
+        trigger: { kind: "Mouse", code: "Right" },
+        emit: { kind: "Key", code: "ShiftLeft" },
+        mode: "Toggle",
+        release_delay_ms: 25,
+      });
+      return { ...prev, modifier_remaps: list };
+    });
+  }, []);
+
+  // --- chord_bindings -----------------------------------------------------
+
+  const setChordBinding = useCallback((next: ChordBindingType) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const list = [...(prev.chord_bindings ?? [])];
+      const idx = list.findIndex((c) => c.uid === next.uid);
+      if (idx >= 0) list[idx] = next;
+      return { ...prev, chord_bindings: list };
+    });
+  }, []);
+
+  const deleteChordBinding = useCallback((c: ChordBindingType) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        chord_bindings: (prev.chord_bindings ?? []).filter(
+          (x) => x.uid !== c.uid
+        ),
+      };
+    });
+  }, []);
+
+  const addChordBinding = useCallback((after?: ChordBindingType) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const list = [...(prev.chord_bindings ?? [])];
+      const idx = after ? list.findIndex((c) => c.uid === after.uid) : -1;
+      list.splice(idx + 1, 0, {
+        uid: self.crypto.randomUUID(),
+        comment: "",
+        buttons: ["Side", "Extra"],
+        window_ms: 100,
+        cmd_str: "",
+        passthrough: true,
+      });
+      return { ...prev, chord_bindings: list };
+    });
+  }, []);
 
   const saveConfig = async () => {
     await invoke("save_config", { newConfig: config });
@@ -227,6 +325,85 @@ export default function App() {
             }
           >
             <AddIcon /> Add a binding
+          </Button>
+        </div>
+
+        <Divider style={{ width: "100%", margin: "16px 0" }} />
+        <Typography variant="h6" style={{ marginBottom: 8 }}>
+          Modifier remaps
+        </Typography>
+        <Typography
+          variant="body2"
+          style={{ color: "#666", marginBottom: 10, maxWidth: 720, textAlign: "center" }}
+        >
+          While the gate input is held, the trigger input is intercepted and
+          the configured key/button is emitted instead. "Toggle" makes each
+          trigger press flip the emit on/off; "Hold" releases when the trigger
+          releases.
+        </Typography>
+        {(config.modifier_remaps ?? []).map((remap) => (
+          <ModifierRemapMemo
+            key={remap.uid}
+            remap={remap}
+            setRemap={setModifierRemap}
+            addRemap={addModifierRemap}
+            deleteRemap={deleteModifierRemap}
+          />
+        ))}
+        <div
+          style={{
+            width: "100%",
+            paddingBottom: 8,
+            marginBottom: 8,
+            display: "flex",
+            justifyContent: "center",
+          }}
+        >
+          <Button
+            variant="contained"
+            size="small"
+            onClick={() => addModifierRemap()}
+          >
+            <AddIcon /> Add a modifier remap
+          </Button>
+        </div>
+
+        <Divider style={{ width: "100%", margin: "16px 0" }} />
+        <Typography variant="h6" style={{ marginBottom: 8 }}>
+          Chord bindings
+        </Typography>
+        <Typography
+          variant="body2"
+          style={{ color: "#666", marginBottom: 10, maxWidth: 720, textAlign: "center" }}
+        >
+          When all selected mouse buttons are pressed within the time window,
+          the command runs. Pass-through keeps original button events flowing
+          to the host app (so e.g. browser back/forward still works).
+        </Typography>
+        {(config.chord_bindings ?? []).map((chord) => (
+          <ChordBindingMemo
+            key={chord.uid}
+            chord={chord}
+            setChord={setChordBinding}
+            addChord={addChordBinding}
+            deleteChord={deleteChordBinding}
+          />
+        ))}
+        <div
+          style={{
+            width: "100%",
+            paddingBottom: 8,
+            marginBottom: 16,
+            display: "flex",
+            justifyContent: "center",
+          }}
+        >
+          <Button
+            variant="contained"
+            size="small"
+            onClick={() => addChordBinding()}
+          >
+            <AddIcon /> Add a chord binding
           </Button>
         </div>
       </div>
