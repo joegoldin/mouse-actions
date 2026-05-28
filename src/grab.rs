@@ -4,7 +4,9 @@ use std::{thread, time};
 
 use log::Level::Trace;
 use log::{debug, error, log_enabled, trace};
-use rdev::{grab, simulate, Button, Event, EventType, GrabError, Key};
+use rdev::{grab, Button, Event, EventType, GrabError, Key};
+
+use crate::uinput_simulate::simulate;
 
 use crate::args::Args;
 use crate::config::Config;

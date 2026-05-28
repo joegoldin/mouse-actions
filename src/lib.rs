@@ -7,6 +7,7 @@ pub mod event;
 pub mod grab;
 pub mod input_rules;
 pub mod listen;
+pub mod uinput_simulate;
 pub mod points_to_angles;
 pub mod process_args;
 pub mod process_event;

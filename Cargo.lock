@@ -611,6 +611,7 @@ dependencies = [
  "clap",
  "dirs-sys",
  "env_logger",
+ "evdev-rs",
  "fancy-regex",
  "fs2",
  "lazy_static",

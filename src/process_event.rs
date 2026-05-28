@@ -6,7 +6,9 @@ use std::time::Instant;
 use std::{thread, time};
 
 use log::{debug, error, info, trace, warn};
-use rdev::{simulate, EventType};
+use rdev::EventType;
+
+use crate::uinput_simulate::simulate;
 
 use crate::args::Args;
 use crate::binding::Binding;

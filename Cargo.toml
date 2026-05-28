@@ -9,6 +9,7 @@ license = "MIT"
 
 [dependencies]
 rdev = { path = "rdev", features = ["unstable_grab", "serialize"] }
+evdev-rs = "0.4.0"
 serde = { version = "1.0.159", features = ["derive"] }
 serde_json = "1.0.95"
 dirs-sys = "0.4.0"
