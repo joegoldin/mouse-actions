@@ -1,7 +1,6 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
-
 use mouse_actions;
 use mouse_actions::config;
+use tauri::Manager;
 
 #[tauri::command]
 fn get_default_config_path() -> String {
@@ -63,6 +62,7 @@ fn save_config(new_config: config::Config) {
 
 pub fn open_config_editor() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             get_default_config_path,
             get_version,
@@ -72,12 +72,12 @@ pub fn open_config_editor() {
             start
         ])
         .setup(|app| {
-            tauri::WindowBuilder::new(app, "main", tauri::WindowUrl::App("index.html".into()))
-                .title(format!(
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.set_title(&format!(
                     "Mouse Actions Config Editor v{}",
                     mouse_actions::process_args::get_version()
-                ))
-                .build()?;
+                ));
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
