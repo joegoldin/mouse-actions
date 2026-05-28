@@ -970,6 +970,25 @@
         "F9"
       ]
     }
+  ],
+  "modifier_remaps": [
+    {
+      "comment": "While Left mouse button is held, Right click toggles ShiftLeft. Mirrors a 'drag-shift' helper for KWin window axis-snap.",
+      "while_held": { "kind": "Mouse", "code": "Left" },
+      "trigger":    { "kind": "Mouse", "code": "Right" },
+      "emit":       { "kind": "Key",   "code": "ShiftLeft" },
+      "mode": "Toggle",
+      "release_delay_ms": 25
+    }
+  ],
+  "chord_bindings": [
+    {
+      "comment": "Forward + Back mouse buttons within 100 ms → invoke KDE Overview via dbus-send. Original button events still pass through.",
+      "buttons": ["Side", "Extra"],
+      "window_ms": 100,
+      "cmd_str": "dbus-send --type=method_call --dest=org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component.invokeShortcut string:Overview",
+      "passthrough": true
+    }
   ]
 }
 

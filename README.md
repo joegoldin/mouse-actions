@@ -37,6 +37,11 @@ are optional):
 * Press/release only or click (don't propagate the press & release event)
 * With some modifiers : shift/Ctrl/Alt...
 * With screen edge : Top/Left...
+* **Modifier remaps**: "while X held, when Y pressed, emit Z" — X/Y/Z each
+  a key or mouse button. Useful e.g. to inject `Shift` while right-clicking
+  during a window drag.
+* **Chord bindings**: "when buttons A+B are pressed within N ms, run a
+  command" — e.g. mouse forward + back → trigger Overview.
 * Auto reload config on changes
 * Very low resource usage
     * Fast shape recognition : ~200µs (0.0002 sec) for a config with 30 shapes
@@ -206,6 +211,35 @@ The config file default path is `~/.config/mouse-actions.json`
           `ControlRight`, `MetaLeft`, `Alt`, `AltGr`
         * `shapes_xy`: the shapes, array of arrays of coordinates. The best
           shape match will be used.
+
+* `modifier_remaps` *(optional)*: array of:
+    * `while_held`: `{ "kind": "Mouse"|"Key", "code": "<name>" }` — the
+      gate input that must be held for the rule to be active
+    * `trigger`: `{ "kind": "Mouse"|"Key", "code": "<name>" }` — the input
+      that, when pressed while `while_held` is active, fires the remap
+    * `emit`: `{ "kind": "Mouse"|"Key", "code": "<name>" }` — what to
+      simulate. Mouse code names: same as `shape_button`. Key code names:
+      any rdev `Key` variant (e.g. `ShiftLeft`, `ControlLeft`, `Alt`,
+      `MetaLeft`, `KeyA` … `KeyZ`, `F1` … `F12`).
+    * `mode`: `"Hold"` (emit press while trigger pressed, release on
+      trigger release) or `"Toggle"` (each trigger press flips emit; emit
+      forced off when `while_held` releases).
+    * `release_delay_ms`: ms delay before releasing `emit` when
+      `while_held` releases. Default 25 — lets downstream consumers
+      finalize gestures that started while the emit was active.
+    * The trigger's own press/release events are swallowed while the
+      remap is active.
+
+* `chord_bindings` *(optional)*: array of:
+    * `buttons`: array of mouse button names (e.g. `["Side", "Extra"]`)
+    * `window_ms`: max time between presses to count as a chord
+      (default 100)
+    * `cmd_str`: shell command to execute when the chord completes
+    * `passthrough`: if `true` (default), the original button events still
+      reach the host (so e.g. browser back/forward still works alongside
+      a chord shortcut). Set `false` to swallow the original events.
+
+Full example: see [`examples/mouse-actions.json`](examples/mouse-actions.json).
 
 ## CLI usage
 

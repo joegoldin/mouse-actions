@@ -5,6 +5,7 @@ pub mod compare_angles;
 pub mod config;
 pub mod event;
 pub mod grab;
+pub mod input_rules;
 pub mod listen;
 pub mod points_to_angles;
 pub mod process_args;

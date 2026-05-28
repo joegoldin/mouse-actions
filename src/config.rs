@@ -26,6 +26,12 @@ use crate::points_to_angles::points_to_angles;
 pub struct Config {
     pub shape_button: MouseButton,
     pub bindings: Vec<Binding>,
+    /// "While X held, when Y pressed, emit Z" — see `input_rules::ModifierRemap`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifier_remaps: Vec<crate::input_rules::ModifierRemap>,
+    /// Mouse button chords (e.g. forward+back) → shell command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chord_bindings: Vec<crate::input_rules::ChordBinding>,
 }
 
 pub fn load(file_path: &str) -> Config {
@@ -148,6 +154,8 @@ pub fn init_config_file_if_not_exists(config_path: &Path) {
         let empty_config = Config {
             shape_button: MouseButton::Right,
             bindings: vec![],
+            modifier_remaps: vec![],
+            chord_bindings: vec![],
         };
         let serialized = serde_json::to_string_pretty(&empty_config).unwrap();
 
@@ -243,6 +251,8 @@ mod tests {
                 cmd_str: String::from("xlogo"),
                 comment: String::new(),
             }],
+            modifier_remaps: vec![],
+            chord_bindings: vec![],
         };
 
         let serialized = serde_json::to_string_pretty(&config).unwrap();
