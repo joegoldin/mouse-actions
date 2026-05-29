@@ -1,6 +1,82 @@
 use mouse_actions;
 use mouse_actions::config;
+use serde::Serialize;
+use std::process::Command;
 use tauri::Manager;
+
+/// The systemd user unit we expect to manage the gesture daemon. Hardcoded
+/// to match what the home-manager module installs (see
+/// `hosts/common/home/mouse-actions/default.nix` in the consumer dotfiles).
+const SERVICE_UNIT: &str = "mouse-actions.service";
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ServiceStatus {
+    /// `LoadState=loaded` — the unit file is installed and known to systemd.
+    /// When false, every other field is meaningless and the GUI falls back
+    /// to managing the daemon as a direct subprocess.
+    available: bool,
+    /// `ActiveState=active`.
+    active: bool,
+    /// "active" | "inactive" | "failed" | "activating" | "deactivating" | ...
+    active_state: String,
+    /// "running" | "dead" | "exited" | "failed" | "auto-restart" | ...
+    sub_state: String,
+}
+
+fn systemctl_show(prop: &str) -> Option<String> {
+    let out = Command::new("systemctl")
+        .args(["--user", "show", "-p", prop, "--value", SERVICE_UNIT])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[tauri::command(async)]
+fn service_status() -> ServiceStatus {
+    let load = systemctl_show("LoadState").unwrap_or_default();
+    let active_state = systemctl_show("ActiveState").unwrap_or_default();
+    let sub_state = systemctl_show("SubState").unwrap_or_default();
+    ServiceStatus {
+        available: load == "loaded",
+        active: active_state == "active",
+        active_state,
+        sub_state,
+    }
+}
+
+fn systemctl_action(action: &str) -> Result<(), String> {
+    let out = Command::new("systemctl")
+        .args(["--user", action, SERVICE_UNIT])
+        .output()
+        .map_err(|e| format!("spawn systemctl: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("systemctl --user {} {}: exit {:?}", action, SERVICE_UNIT, out.status.code())
+        } else {
+            err
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn service_start() -> Result<(), String> {
+    systemctl_action("start")
+}
+
+#[tauri::command(async)]
+fn service_stop() -> Result<(), String> {
+    systemctl_action("stop")
+}
+
+#[tauri::command(async)]
+fn service_restart() -> Result<(), String> {
+    systemctl_action("restart")
+}
 
 #[tauri::command]
 fn get_default_config_path() -> String {
@@ -69,7 +145,11 @@ pub fn open_config_editor() {
             get_config,
             save_config,
             stop,
-            start
+            start,
+            service_status,
+            service_start,
+            service_stop,
+            service_restart,
         ])
         .setup(|app| {
             if let Some(main) = app.get_webview_window("main") {

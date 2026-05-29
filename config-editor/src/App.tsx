@@ -12,14 +12,24 @@ import {
 import { ButtonSelector } from "./ButtonSelector";
 import { ModifierRemapMemo } from "./ModifierRemap";
 import { ChordBindingMemo } from "./ChordBinding";
-import { Button, ButtonGroup, Divider, Typography } from "@mui/material";
+import { Button, ButtonGroup, Chip, Divider, Tooltip, Typography } from "@mui/material";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import StopIcon from "@mui/icons-material/Stop";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import SaveIcon from "@mui/icons-material/Save";
 import UndoIcon from "@mui/icons-material/Undo";
 import GestureIcon from "@mui/icons-material/Gesture";
 import AddIcon from "@mui/icons-material/Add";
 import { AppSkeleton } from "./AppSkeleton";
+
+type ServiceStatus = {
+  available: boolean;
+  active: boolean;
+  active_state: string;
+  sub_state: string;
+};
+
+const POLL_MS = 2500;
 
 export default function App() {
   const [isLoading, setIsLoading] = useState(false);
@@ -27,6 +37,7 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [config, setConfig] = useState<ConfigType>();
   const [shapeRecording, setShapeRecording] = useState(false);
+  const [svc, setSvc] = useState<ServiceStatus | undefined>();
 
   async function getDefaultConfigPath() {
     // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
@@ -36,6 +47,27 @@ export default function App() {
   useEffect(() => {
     invoke("get_version").then((v: any) => setVersion(v));
   }, []);
+
+  // --- Service status polling --------------------------------------------
+  //
+  // Hits the Tauri command which shells out to `systemctl --user show`. Used
+  // to color the status chip and gate the Start/Stop buttons. Best-effort —
+  // errors silently leave the chip showing the last known state.
+  const refreshSvc = useCallback(async () => {
+    try {
+      const s: ServiceStatus = await invoke("service_status");
+      setSvc(s);
+    } catch (e) {
+      // Tauri command failed — treat the service as unmanaged.
+      setSvc(undefined);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSvc();
+    const t = setInterval(refreshSvc, POLL_MS);
+    return () => clearInterval(t);
+  }, [refreshSvc]);
 
   // const [coords, setCoords] = useState<number[]>([
   //   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1000, 1000,
@@ -233,6 +265,41 @@ export default function App() {
     await invoke("save_config", { newConfig: config });
   };
 
+  // When the systemd unit is loaded, route the toolbar buttons through it so
+  // the GUI and the tray (and `systemctl status`) all agree about who's
+  // running. When the unit isn't present, fall back to the original direct
+  // subprocess path so the GUI still works on machines without systemd
+  // integration.
+  const useService = !!svc?.available;
+  const onStart = useCallback(async () => {
+    await invoke(useService ? "service_start" : "start");
+    refreshSvc();
+  }, [useService, refreshSvc]);
+  const onStop = useCallback(async () => {
+    await invoke(useService ? "service_stop" : "stop");
+    refreshSvc();
+  }, [useService, refreshSvc]);
+  const onRestart = useCallback(async () => {
+    await invoke("service_restart");
+    refreshSvc();
+  }, [refreshSvc]);
+
+  const svcChipLabel = svc
+    ? svc.available
+      ? `service: ${svc.active_state}${svc.sub_state ? ` (${svc.sub_state})` : ""}`
+      : "service: not installed"
+    : "service: ?";
+  const svcChipColor: "success" | "default" | "warning" | "error" =
+    svc?.active
+      ? "success"
+      : svc?.available && svc.active_state === "failed"
+        ? "error"
+        : svc?.available
+          ? "warning"
+          : "default";
+  const startDisabled = useService && !!svc?.active;
+  const stopDisabled = useService && !svc?.active;
+
   return config && !isLoading ? (
     <div
       style={{
@@ -268,28 +335,51 @@ export default function App() {
             setButton={setShapeButton}
           />
         </div>
-        <ButtonGroup>
-          <Button
-            color="warning"
-            variant="contained"
-            onClick={() => invoke("stop")}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Tooltip
+            title={
+              useService
+                ? "Buttons act on the systemd user unit mouse-actions.service. Polled every 2.5 s."
+                : "mouse-actions.service is not installed; Start/Stop spawn the daemon directly as a subprocess."
+            }
           >
-            <StopIcon /> Stop
-          </Button>
-          <Button
-            variant="contained"
-            onClick={() => invoke("start")}
-            color="success"
-          >
-            <PlayArrowIcon /> Start
-          </Button>
-          <Button color="warning" variant="contained" onClick={refreshConfig}>
-            <UndoIcon /> Reload config
-          </Button>
-          <Button variant="contained" onClick={saveConfig}>
-            <SaveIcon /> Save
-          </Button>
-        </ButtonGroup>
+            <Chip
+              size="small"
+              color={svcChipColor}
+              variant={svcChipColor === "default" ? "outlined" : "filled"}
+              label={svcChipLabel}
+            />
+          </Tooltip>
+          <ButtonGroup>
+            <Button
+              color="warning"
+              variant="contained"
+              onClick={onStop}
+              disabled={stopDisabled}
+            >
+              <StopIcon /> Stop
+            </Button>
+            <Button
+              variant="contained"
+              onClick={onStart}
+              color="success"
+              disabled={startDisabled}
+            >
+              <PlayArrowIcon /> Start
+            </Button>
+            {useService && (
+              <Button variant="contained" onClick={onRestart} color="info">
+                <RestartAltIcon /> Restart
+              </Button>
+            )}
+            <Button color="warning" variant="contained" onClick={refreshConfig}>
+              <UndoIcon /> Reload config
+            </Button>
+            <Button variant="contained" onClick={saveConfig}>
+              <SaveIcon /> Save
+            </Button>
+          </ButtonGroup>
+        </div>
       </div>
       <div
         style={{
