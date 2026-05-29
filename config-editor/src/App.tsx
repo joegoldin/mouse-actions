@@ -120,25 +120,18 @@ export default function App() {
     refreshConfig();
   }, []);
 
+  // All binding mutators below MUST spread `prevConfig` first. Building a
+  // fresh `{ shape_button, bindings }` literal silently strips every
+  // sibling field — modifier_remaps, chord_bindings, anything we add
+  // later — and the next Save then writes the truncated config to disk.
   const onNewBinding = useCallback(
     (newBinding: BindingType) => {
       setConfig((prevConfig) => {
-        if (prevConfig) {
-          const newConfig = {
-            ...prevConfig,
-            binding: [...prevConfig?.bindings],
-          };
-          const index = prevConfig?.bindings.findIndex(
-            (b) => b.uid === newBinding.uid
-          );
-          if (index >= 0) {
-            newConfig.bindings[index] = newBinding;
-            setConfig(newConfig);
-          }
-          return newConfig;
-        } else {
-          return prevConfig;
-        }
+        if (!prevConfig) return prevConfig;
+        const bindings = [...prevConfig.bindings];
+        const index = bindings.findIndex((b) => b.uid === newBinding.uid);
+        if (index >= 0) bindings[index] = newBinding;
+        return { ...prevConfig, bindings };
       });
     },
     [setConfig]
@@ -147,17 +140,11 @@ export default function App() {
   const deleteBinding = useCallback(
     (binding: BindingType) => {
       setConfig((prevConfig) => {
-        const index = prevConfig?.bindings.findIndex(
-          (b) => b.uid === binding.uid
-        );
-        const newConfig: ConfigType = {
-          shape_button: prevConfig?.shape_button || "Right",
-          bindings: [...(prevConfig?.bindings || [])],
-        };
-        if (index !== undefined) {
-          newConfig.bindings.splice(index, 1);
-        }
-        return newConfig;
+        if (!prevConfig) return prevConfig;
+        const bindings = [...prevConfig.bindings];
+        const index = bindings.findIndex((b) => b.uid === binding.uid);
+        if (index >= 0) bindings.splice(index, 1);
+        return { ...prevConfig, bindings };
       });
     },
     [setConfig]
@@ -166,15 +153,12 @@ export default function App() {
   const addBinding = useCallback(
     (binding?: BindingType) => {
       setConfig((prevConfig) => {
-        const index = prevConfig?.bindings.findIndex(
-          (b) => b.uid === binding?.uid
-        );
-
-        const newConfig: ConfigType = {
-          shape_button: prevConfig?.shape_button || "Right",
-          bindings: [...(prevConfig?.bindings || [])],
-        };
-        newConfig.bindings?.splice((index ?? -1) + 1, 0, {
+        if (!prevConfig) return prevConfig;
+        const bindings = [...prevConfig.bindings];
+        const index = binding
+          ? bindings.findIndex((b) => b.uid === binding.uid)
+          : -1;
+        bindings.splice((index ?? -1) + 1, 0, {
           uid: self.crypto.randomUUID(),
           cmd_str: "TODO",
           comment: "TODO",
@@ -186,7 +170,7 @@ export default function App() {
             shapes_xy: [],
           },
         });
-        return newConfig;
+        return { ...prevConfig, bindings };
       });
     },
     [setConfig]
