@@ -12,7 +12,19 @@ import {
 import { ButtonSelector } from "./ButtonSelector";
 import { ModifierRemapMemo } from "./ModifierRemap";
 import { ChordBindingMemo } from "./ChordBinding";
-import { Button, ButtonGroup, Chip, Divider, Tooltip, Typography } from "@mui/material";
+import {
+  Button,
+  ButtonGroup,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  Divider,
+  Tooltip,
+  Typography,
+} from "@mui/material";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import StopIcon from "@mui/icons-material/Stop";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
@@ -20,6 +32,8 @@ import SaveIcon from "@mui/icons-material/Save";
 import UndoIcon from "@mui/icons-material/Undo";
 import GestureIcon from "@mui/icons-material/Gesture";
 import AddIcon from "@mui/icons-material/Add";
+import InstallDesktopIcon from "@mui/icons-material/InstallDesktop";
+import DeleteForeverIcon from "@mui/icons-material/DeleteForever";
 import { AppSkeleton } from "./AppSkeleton";
 
 type ServiceStatus = {
@@ -27,6 +41,8 @@ type ServiceStatus = {
   active: boolean;
   active_state: string;
   sub_state: string;
+  fragment_path: string;
+  user_installed: boolean;
 };
 
 const POLL_MS = 2500;
@@ -38,6 +54,12 @@ export default function App() {
   const [config, setConfig] = useState<ConfigType>();
   const [shapeRecording, setShapeRecording] = useState(false);
   const [svc, setSvc] = useState<ServiceStatus | undefined>();
+  const [confirm, setConfirm] = useState<
+    | { kind: "install" }
+    | { kind: "uninstall" }
+    | { kind: "error"; message: string }
+    | undefined
+  >();
 
   async function getDefaultConfigPath() {
     // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
@@ -284,6 +306,28 @@ export default function App() {
     refreshSvc();
   }, [refreshSvc]);
 
+  const onInstallConfirm = useCallback(async () => {
+    setConfirm(undefined);
+    try {
+      await invoke("service_install");
+    } catch (e) {
+      setConfirm({ kind: "error", message: String(e) });
+    } finally {
+      refreshSvc();
+    }
+  }, [refreshSvc]);
+
+  const onUninstallConfirm = useCallback(async () => {
+    setConfirm(undefined);
+    try {
+      await invoke("service_uninstall");
+    } catch (e) {
+      setConfirm({ kind: "error", message: String(e) });
+    } finally {
+      refreshSvc();
+    }
+  }, [refreshSvc]);
+
   const svcChipLabel = svc
     ? svc.available
       ? `service: ${svc.active_state}${svc.sub_state ? ` (${svc.sub_state})` : ""}`
@@ -350,6 +394,32 @@ export default function App() {
               label={svcChipLabel}
             />
           </Tooltip>
+          {svc && !svc.available && (
+            <Button
+              size="small"
+              variant="outlined"
+              color="primary"
+              onClick={() => setConfirm({ kind: "install" })}
+              startIcon={<InstallDesktopIcon />}
+            >
+              Install service
+            </Button>
+          )}
+          {svc?.available && svc.user_installed && (
+            <Tooltip
+              title={`Will disable, stop, and remove ${svc.fragment_path}.`}
+            >
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick={() => setConfirm({ kind: "uninstall" })}
+                startIcon={<DeleteForeverIcon />}
+              >
+                Uninstall
+              </Button>
+            </Tooltip>
+          )}
           <ButtonGroup>
             <Button
               color="warning"
@@ -380,6 +450,80 @@ export default function App() {
             </Button>
           </ButtonGroup>
         </div>
+        <Dialog
+          open={confirm?.kind === "install"}
+          onClose={() => setConfirm(undefined)}
+        >
+          <DialogTitle>Install mouse-actions.service?</DialogTitle>
+          <DialogContent>
+            <DialogContentText component="div">
+              Writes a systemd user unit to
+              <pre style={{ margin: "6px 0", background: "#f4f4f4", padding: 6 }}>
+                ~/.config/systemd/user/mouse-actions.service
+              </pre>
+              and runs:
+              <pre style={{ margin: "6px 0", background: "#f4f4f4", padding: 6 }}>
+                {"systemctl --user daemon-reload\nsystemctl --user enable --now mouse-actions.service"}
+              </pre>
+              The unit's ExecStart points at the `mouse-actions` CLI binary
+              found next to this app (or on PATH). After install, this GUI's
+              Start/Stop/Restart buttons route through systemd.
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirm(undefined)}>Cancel</Button>
+            <Button
+              variant="contained"
+              color="primary"
+              onClick={onInstallConfirm}
+            >
+              Install
+            </Button>
+          </DialogActions>
+        </Dialog>
+        <Dialog
+          open={confirm?.kind === "uninstall"}
+          onClose={() => setConfirm(undefined)}
+        >
+          <DialogTitle>Uninstall mouse-actions.service?</DialogTitle>
+          <DialogContent>
+            <DialogContentText component="div">
+              Will run:
+              <pre style={{ margin: "6px 0", background: "#f4f4f4", padding: 6 }}>
+                {`systemctl --user disable --now mouse-actions.service\nrm ${svc?.fragment_path ?? ""}\nsystemctl --user daemon-reload`}
+              </pre>
+              The mouse-actions CLI binary itself is untouched. Only the user
+              systemd unit file installed by this GUI is removed.
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirm(undefined)}>Cancel</Button>
+            <Button
+              variant="contained"
+              color="warning"
+              onClick={onUninstallConfirm}
+            >
+              Uninstall
+            </Button>
+          </DialogActions>
+        </Dialog>
+        <Dialog
+          open={confirm?.kind === "error"}
+          onClose={() => setConfirm(undefined)}
+        >
+          <DialogTitle>Service action failed</DialogTitle>
+          <DialogContent>
+            <DialogContentText
+              component="pre"
+              style={{ whiteSpace: "pre-wrap", fontFamily: "monospace" }}
+            >
+              {confirm?.kind === "error" ? confirm.message : ""}
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirm(undefined)}>OK</Button>
+          </DialogActions>
+        </Dialog>
       </div>
       <div
         style={{
