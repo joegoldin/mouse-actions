@@ -34,6 +34,19 @@ pub struct GrabContext {
     pub held_keys: Arc<Mutex<Vec<Key>>>,
     pub remap_states: Arc<Mutex<Vec<ModifierRemapState>>>,
     pub chord_history: Arc<Mutex<Vec<(MouseButton, time::Instant)>>>,
+    // Chord-swallow buffering: when a button participates in a chord_binding
+    // with passthrough=false, its press is held back here until either the
+    // chord completes (cancelled) or the chord's window expires (released).
+    pub pending_chord_press: Arc<Mutex<Vec<(Button, time::Instant)>>>,
+    // Buttons whose press was swallowed because their chord fired. Their
+    // subsequent physical release should also be swallowed so the host never
+    // sees a stray release without a preceding press.
+    pub chord_consumed: Arc<Mutex<Vec<Button>>>,
+    // Press/release events we ourselves just emitted via uinput. When the
+    // grab loop sees them coming back through the injector device we let
+    // them through unchanged instead of feeding them back into the chord
+    // state machine.
+    pub recently_injected: Arc<Mutex<Vec<(Button, time::Instant)>>>,
 }
 
 pub fn start_grab_binding(
@@ -52,6 +65,11 @@ pub fn start_grab_binding(
     let remap_states: Arc<Mutex<Vec<ModifierRemapState>>> = Arc::new(Mutex::new(Vec::new()));
     let chord_history: Arc<Mutex<Vec<(MouseButton, time::Instant)>>> =
         Arc::new(Mutex::new(Vec::new()));
+    let pending_chord_press: Arc<Mutex<Vec<(Button, time::Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let chord_consumed: Arc<Mutex<Vec<Button>>> = Arc::new(Mutex::new(Vec::new()));
+    let recently_injected: Arc<Mutex<Vec<(Button, time::Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
     if !args.no_listen {
         listen::start_listen(last_point.clone());
     }
@@ -69,6 +87,9 @@ pub fn start_grab_binding(
             held_keys: held_keys.clone(),
             remap_states: remap_states.clone(),
             chord_history: chord_history.clone(),
+            pending_chord_press: pending_chord_press.clone(),
+            chord_consumed: chord_consumed.clone(),
+            recently_injected: recently_injected.clone(),
         };
         grab_event_fn(event, context, process_event_fn)
     })
@@ -123,6 +144,70 @@ fn record_press(history: &mut Vec<(MouseButton, time::Instant)>, btn: MouseButto
     }
 }
 
+/// Drop entries older than `max_age_ms` from a (Button, Instant) ring buffer.
+/// Caps total length too — defends against runaway growth if we ever stop
+/// trimming on the read path.
+fn prune_old(buf: &mut Vec<(Button, time::Instant)>, now: time::Instant, max_age_ms: u64) {
+    let cutoff = time::Duration::from_millis(max_age_ms);
+    buf.retain(|(_, t)| now.duration_since(*t) <= cutoff);
+    if buf.len() > 64 {
+        let drop = buf.len() - 32;
+        buf.drain(0..drop);
+    }
+}
+
+/// `Some(window_ms)` if the button participates in any chord_binding whose
+/// passthrough is false. We use the largest such window so we wait long
+/// enough for the chord to potentially complete.
+fn chord_swallow_window_for(
+    btn: MouseButton,
+    chords: &[crate::input_rules::ChordBinding],
+) -> Option<u64> {
+    chords
+        .iter()
+        .filter(|c| !c.passthrough && c.buttons.contains(&btn))
+        .map(|c| c.window_ms)
+        .max()
+}
+
+/// `true` if we just emitted this button event ourselves via uinput; consumes
+/// the matching entry so the next physical event hits the chord logic again.
+fn consume_injected(
+    buf: &mut Vec<(Button, time::Instant)>,
+    btn: Button,
+    now: time::Instant,
+) -> bool {
+    prune_old(buf, now, 50);
+    if let Some(idx) = buf.iter().position(|(b, _)| *b == btn) {
+        buf.remove(idx);
+        true
+    } else {
+        false
+    }
+}
+
+/// Inject a synthetic press or release for `btn` and tag it in
+/// `recently_injected` so the grab callback recognizes its own echo and
+/// doesn't feed it back into the chord state machine.
+fn inject_button(
+    btn: Button,
+    press: bool,
+    recently_injected: &Arc<Mutex<Vec<(Button, time::Instant)>>>,
+) {
+    {
+        let mut buf = recently_injected.lock().unwrap();
+        buf.push((btn, time::Instant::now()));
+    }
+    let evt = if press {
+        EventType::ButtonPress(btn)
+    } else {
+        EventType::ButtonRelease(btn)
+    };
+    if let Err(e) = simulate(&evt) {
+        error!("simulate {:?} failed: {:?}", evt, e);
+    }
+}
+
 pub fn grab_event_fn(
     event: Event,
     GrabContext {
@@ -136,6 +221,9 @@ pub fn grab_event_fn(
         held_keys,
         remap_states,
         chord_history,
+        pending_chord_press,
+        chord_consumed,
+        recently_injected,
     }: GrabContext,
     process_event_fn: fn(Arc<Mutex<Config>>, ClickEvent, Arc<Args>) -> bool,
 ) -> Option<Event> {
@@ -157,6 +245,19 @@ pub fn grab_event_fn(
             Some(event)
         }
         EventType::ButtonPress(pressed_btn) => {
+            let now = time::Instant::now();
+
+            // --- Inject echo bypass ------------------------------------------
+            // If this is our own synthetic press coming back through the
+            // injector device, let it through unchanged.
+            if consume_injected(&mut recently_injected.lock().unwrap(), pressed_btn, now) {
+                let mut hb = held_buttons.lock().unwrap();
+                if !hb.iter().any(|b| *b == pressed_btn) {
+                    hb.push(pressed_btn);
+                }
+                return Some(event);
+            }
+
             {
                 let mut hb = held_buttons.lock().unwrap();
                 if !hb.iter().any(|b| *b == pressed_btn) {
@@ -164,23 +265,84 @@ pub fn grab_event_fn(
                 }
             }
             let mouse_btn = MouseButton::from_rdev_event(pressed_btn);
-            let now = time::Instant::now();
 
             // --- Chord bindings ----------------------------------------------
             let cfg_chords = config.lock().unwrap().chord_bindings.clone();
             let mut swallow_chord = false;
+            let mut fired_swallow_chord: Option<usize> = None;
             {
                 let history = chord_history.lock().unwrap();
-                for chord in &cfg_chords {
+                for (idx, chord) in cfg_chords.iter().enumerate() {
                     if chord_complete(chord, mouse_btn, now, &history) {
                         spawn_shell_cmd(&chord.cmd_str);
                         if !chord.passthrough {
                             swallow_chord = true;
+                            fired_swallow_chord = Some(idx);
                         }
                     }
                 }
             }
             record_press(&mut chord_history.lock().unwrap(), mouse_btn, now);
+
+            // If a passthrough=false chord just fired, cancel any pending
+            // first-press buffers for the other buttons in that chord and
+            // mark all participants so we also swallow their physical
+            // releases below.
+            if let Some(idx) = fired_swallow_chord {
+                let chord = &cfg_chords[idx];
+                let other_rdev: Vec<Button> = chord
+                    .buttons
+                    .iter()
+                    .map(|b| b.to_rdev_event())
+                    .collect();
+                {
+                    let mut pending = pending_chord_press.lock().unwrap();
+                    pending.retain(|(b, _)| !other_rdev.contains(b));
+                }
+                {
+                    let mut consumed = chord_consumed.lock().unwrap();
+                    for b in &other_rdev {
+                        if !consumed.contains(b) {
+                            consumed.push(*b);
+                        }
+                    }
+                }
+            }
+
+            // If no chord fired yet but this button is the FIRST member of a
+            // passthrough=false chord, defer its press: a sibling button
+            // arriving within window_ms will cancel us; otherwise a timer
+            // re-injects it via uinput so a solo click still reaches the
+            // host (with a small added latency = window_ms).
+            if !swallow_chord {
+                if let Some(window_ms) = chord_swallow_window_for(mouse_btn, &cfg_chords) {
+                    {
+                        let mut pending = pending_chord_press.lock().unwrap();
+                        prune_old(&mut pending, now, window_ms.saturating_mul(4));
+                        pending.retain(|(b, _)| *b != pressed_btn);
+                        pending.push((pressed_btn, now));
+                    }
+                    let pending_arc = pending_chord_press.clone();
+                    let injected_arc = recently_injected.clone();
+                    thread::spawn(move || {
+                        thread::sleep(time::Duration::from_millis(window_ms));
+                        let still_pending = {
+                            let pending = pending_arc.lock().unwrap();
+                            pending
+                                .iter()
+                                .any(|(b, t)| *b == pressed_btn && *t == now)
+                        };
+                        if still_pending {
+                            inject_button(pressed_btn, true, &injected_arc);
+                            // Leave the entry in `pending_chord_press` so the
+                            // physical release of this button still flows
+                            // through the "we deferred this" branch in the
+                            // release handler and emits the matching release.
+                        }
+                    });
+                    return None;
+                }
+            }
 
             // --- Modifier remaps --------------------------------------------
             let cfg_remaps = config.lock().unwrap().modifier_remaps.clone();
@@ -250,6 +412,46 @@ pub fn grab_event_fn(
             }
         }
         EventType::ButtonRelease(btn) => {
+            let now = time::Instant::now();
+
+            // --- Inject echo bypass for releases -----------------------------
+            if consume_injected(&mut recently_injected.lock().unwrap(), btn, now) {
+                held_buttons.lock().unwrap().retain(|b| *b != btn);
+                return Some(event);
+            }
+
+            // --- Was this button's press swallowed in service of a chord? ---
+            // If so, swallow the release too.
+            {
+                let mut consumed = chord_consumed.lock().unwrap();
+                if let Some(pos) = consumed.iter().position(|b| *b == btn) {
+                    consumed.remove(pos);
+                    held_buttons.lock().unwrap().retain(|b| *b != btn);
+                    return None;
+                }
+            }
+
+            // --- Was this press deferred and we're now releasing it before
+            // a chord ever completed? Synthesize the original click pair so
+            // the host doesn't lose the button event entirely.
+            let was_pending = {
+                let mut pending = pending_chord_press.lock().unwrap();
+                if let Some(pos) = pending.iter().position(|(b, _)| *b == btn) {
+                    pending.remove(pos);
+                    true
+                } else {
+                    false
+                }
+            };
+            if was_pending {
+                inject_button(btn, true, &recently_injected);
+                // Tiny gap so libinput/KWin see them as discrete events.
+                thread::sleep(time::Duration::from_millis(1));
+                inject_button(btn, false, &recently_injected);
+                held_buttons.lock().unwrap().retain(|b| *b != btn);
+                return None;
+            }
+
             held_buttons.lock().unwrap().retain(|b| *b != btn);
             let mouse_btn = MouseButton::from_rdev_event(btn);
 
