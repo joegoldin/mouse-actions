@@ -390,13 +390,18 @@ where
                         }
                     }
                 } else {
-                    // Input device recieved event
+                    // Input device received event
                     let device_idx = event.data as usize;
                     let device = devices.get(device_idx).unwrap();
                     while device.has_event_pending() {
-                        //TODO: deal with EV_SYN::SYN_DROPPED
-                        let (_, event) = match device.next_event(evdev_rs::ReadFlag::NORMAL) {
-                            Ok(event) => event,
+                        let (status, ev) = match device.next_event(evdev_rs::ReadFlag::NORMAL) {
+                            Ok(res) => res,
+                            // EAGAIN / WouldBlock: no more events available right
+                            // now. This is normal, NOT a failure — stop draining
+                            // this device but keep it grabbed and polled.
+                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+                            // Any other error (e.g. ENODEV after an unplug) is
+                            // fatal for this device: remove it from the epoll set.
                             Err(_) => {
                                 let device_fd = device.fd().unwrap().into_raw_fd();
                                 let empty_event = epoll::Event::new(epoll::Events::empty(), 0);
@@ -404,12 +409,46 @@ where
                                 continue 'events;
                             }
                         };
-                        let (event, grab_status) = func(event);
 
-                        if let (Some(event), Some(out_device)) =
-                            (event, output_devices.get(device_idx))
+                        // EV_SYN::SYN_DROPPED handling. When the kernel's evdev
+                        // buffer for a grabbed device overflows (common during a
+                        // fast hover/drag burst, since the grab callback drains
+                        // single-threaded), libevdev returns ReadStatus::Sync.
+                        // We must drain the resync delta with the SYNC flag and
+                        // forward each state-correcting event to the clone — a
+                        // dropped button-RELEASE would otherwise leave the
+                        // compositor in an implicit pointer grab (frozen drag
+                        // cursor, dead clicks) until the daemon is restarted.
+                        // The previous code ignored this, hit a read error on the
+                        // next iteration, and DELETED the still-grabbed device
+                        // from epoll — blackholing the mouse entirely.
+                        if status == evdev_rs::ReadStatus::Sync {
+                            loop {
+                                match device.next_event(evdev_rs::ReadFlag::SYNC) {
+                                    Ok((evdev_rs::ReadStatus::Sync, sync_ev)) => {
+                                        let (out_ev, grab_status) = func(sync_ev);
+                                        if let (Some(out_ev), Some(out_device)) =
+                                            (out_ev, output_devices.get(device_idx))
+                                        {
+                                            out_device.write_event(&out_ev)?;
+                                        }
+                                        if grab_status == GrabStatus::Stop {
+                                            break 'event_loop;
+                                        }
+                                    }
+                                    // Resync finished (EAGAIN) or returned to
+                                    // normal status — done correcting state.
+                                    _ => break,
+                                }
+                            }
+                            continue;
+                        }
+
+                        let (out_ev, grab_status) = func(ev);
+                        if let (Some(out_ev), Some(out_device)) =
+                            (out_ev, output_devices.get(device_idx))
                         {
-                            out_device.write_event(&event)?;
+                            out_device.write_event(&out_ev)?;
                         }
                         if grab_status == GrabStatus::Stop {
                             break 'event_loop;
