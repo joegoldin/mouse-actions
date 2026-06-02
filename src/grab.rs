@@ -42,11 +42,6 @@ pub struct GrabContext {
     // subsequent physical release should also be swallowed so the host never
     // sees a stray release without a preceding press.
     pub chord_consumed: Arc<Mutex<Vec<Button>>>,
-    // Press/release events we ourselves just emitted via uinput. When the
-    // grab loop sees them coming back through the injector device we let
-    // them through unchanged instead of feeding them back into the chord
-    // state machine.
-    pub recently_injected: Arc<Mutex<Vec<(Button, time::Instant)>>>,
 }
 
 pub fn start_grab_binding(
@@ -68,8 +63,6 @@ pub fn start_grab_binding(
     let pending_chord_press: Arc<Mutex<Vec<(Button, time::Instant)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let chord_consumed: Arc<Mutex<Vec<Button>>> = Arc::new(Mutex::new(Vec::new()));
-    let recently_injected: Arc<Mutex<Vec<(Button, time::Instant)>>> =
-        Arc::new(Mutex::new(Vec::new()));
     if !args.no_listen {
         listen::start_listen(last_point.clone());
     }
@@ -89,7 +82,6 @@ pub fn start_grab_binding(
             chord_history: chord_history.clone(),
             pending_chord_press: pending_chord_press.clone(),
             chord_consumed: chord_consumed.clone(),
-            recently_injected: recently_injected.clone(),
         };
         grab_event_fn(event, context, process_event_fn)
     })
@@ -170,34 +162,16 @@ fn chord_swallow_window_for(
         .max()
 }
 
-/// `true` if we just emitted this button event ourselves via uinput; consumes
-/// the matching entry so the next physical event hits the chord logic again.
-fn consume_injected(
-    buf: &mut Vec<(Button, time::Instant)>,
-    btn: Button,
-    now: time::Instant,
-) -> bool {
-    prune_old(buf, now, 50);
-    if let Some(idx) = buf.iter().position(|(b, _)| *b == btn) {
-        buf.remove(idx);
-        true
-    } else {
-        false
-    }
-}
-
-/// Inject a synthetic press or release for `btn` and tag it in
-/// `recently_injected` so the grab callback recognizes its own echo and
-/// doesn't feed it back into the chord state machine.
-fn inject_button(
-    btn: Button,
-    press: bool,
-    recently_injected: &Arc<Mutex<Vec<(Button, time::Instant)>>>,
-) {
-    {
-        let mut buf = recently_injected.lock().unwrap();
-        buf.push((btn, time::Instant::now()));
-    }
+/// Inject a synthetic press or release for `btn` via the uinput simulator.
+///
+/// NOTE: injected events do NOT re-enter the grab loop — rdev's device set is
+/// fixed at startup (inotify watching is disabled) and our uinput injector is
+/// created lazily afterwards, so it is never grabbed/read. That means we must
+/// NOT try to recognize "our own echo": there is none. An earlier attempt to
+/// do so (a `recently_injected` buffer) instead matched the *real* physical
+/// release of the same button and skipped re-injecting its release, leaving
+/// e.g. BTN_SIDE stuck down on the injector device.
+fn inject_button(btn: Button, press: bool) {
     let evt = if press {
         EventType::ButtonPress(btn)
     } else {
@@ -223,7 +197,6 @@ pub fn grab_event_fn(
         chord_history,
         pending_chord_press,
         chord_consumed,
-        recently_injected,
     }: GrabContext,
     process_event_fn: fn(Arc<Mutex<Config>>, ClickEvent, Arc<Args>) -> bool,
 ) -> Option<Event> {
@@ -246,17 +219,6 @@ pub fn grab_event_fn(
         }
         EventType::ButtonPress(pressed_btn) => {
             let now = time::Instant::now();
-
-            // --- Inject echo bypass ------------------------------------------
-            // If this is our own synthetic press coming back through the
-            // injector device, let it through unchanged.
-            if consume_injected(&mut recently_injected.lock().unwrap(), pressed_btn, now) {
-                let mut hb = held_buttons.lock().unwrap();
-                if !hb.iter().any(|b| *b == pressed_btn) {
-                    hb.push(pressed_btn);
-                }
-                return Some(event);
-            }
 
             {
                 let mut hb = held_buttons.lock().unwrap();
@@ -323,7 +285,6 @@ pub fn grab_event_fn(
                         pending.push((pressed_btn, now));
                     }
                     let pending_arc = pending_chord_press.clone();
-                    let injected_arc = recently_injected.clone();
                     thread::spawn(move || {
                         thread::sleep(time::Duration::from_millis(window_ms));
                         let still_pending = {
@@ -333,7 +294,7 @@ pub fn grab_event_fn(
                                 .any(|(b, t)| *b == pressed_btn && *t == now)
                         };
                         if still_pending {
-                            inject_button(pressed_btn, true, &injected_arc);
+                            inject_button(pressed_btn, true);
                             // Leave the entry in `pending_chord_press` so the
                             // physical release of this button still flows
                             // through the "we deferred this" branch in the
@@ -412,14 +373,6 @@ pub fn grab_event_fn(
             }
         }
         EventType::ButtonRelease(btn) => {
-            let now = time::Instant::now();
-
-            // --- Inject echo bypass for releases -----------------------------
-            if consume_injected(&mut recently_injected.lock().unwrap(), btn, now) {
-                held_buttons.lock().unwrap().retain(|b| *b != btn);
-                return Some(event);
-            }
-
             // --- Was this button's press swallowed in service of a chord? ---
             // If so, swallow the release too.
             {
@@ -444,10 +397,10 @@ pub fn grab_event_fn(
                 }
             };
             if was_pending {
-                inject_button(btn, true, &recently_injected);
+                inject_button(btn, true);
                 // Tiny gap so libinput/KWin see them as discrete events.
                 thread::sleep(time::Duration::from_millis(1));
-                inject_button(btn, false, &recently_injected);
+                inject_button(btn, false);
                 held_buttons.lock().unwrap().retain(|b| *b != btn);
                 return None;
             }
